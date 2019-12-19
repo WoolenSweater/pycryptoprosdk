@@ -30,6 +30,9 @@ libpycades = Extension(
         '-lcapi10',
         '-lcades',
         '-lrdrsup',
+    ],
+    extra_compile_args=[
+        '-std=c++11',
     ]
 )
 
