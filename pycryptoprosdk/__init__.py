@@ -55,6 +55,26 @@ class CryptoProSDK:
 
         return libpycades.create_hash(self._prepare_message(message), alg)
 
+    def create_sign_hash(self, message, alg, thumb, storage='MY'):
+        """Вычисляет хэш сообщения по ГОСТу.
+
+        :param message: сообщение
+        :param alg: алгоритм хэширования.
+            Возможные значения: 'CALG_GR3411', 'CALG_GR3411_2012_256', 'CALG_GR3411_2012_512'
+        :param thumb: отпечаток сертификата
+        :param storage: хранилище
+        :return: хэш-значение
+        """
+        available_alg = (
+            'CALG_GR3411', 'CALG_GR3411_2012_256', 'CALG_GR3411_2012_512'
+        )
+
+        if alg not in available_alg:
+            raise ValueError('Unexpected algorithm \'{}\''.format(alg))
+
+        return libpycades.create_sign_hash(
+            self._prepare_message(message), alg, thumb, storage)
+
     def get_cert_by_subject(self, store, subject):
         """Возвращает сертификат по subject.
 

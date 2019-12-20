@@ -47,13 +47,13 @@ ALG_ID GetAlgId(const char *algString) {
 
 char * GetHashOidByKeyOid(IN char *szKeyOid) {
     if (strcmp(szKeyOid, szOID_CP_GOST_R3410EL) == 0) {
-	    return szOID_CP_GOST_R3411;
+        return szOID_CP_GOST_R3411;
     }
     else if (strcmp(szKeyOid, szOID_CP_GOST_R3410_12_256) == 0) {
-	    return szOID_CP_GOST_R3411_12_256;
+        return szOID_CP_GOST_R3411_12_256;
     }
     else if (strcmp(szKeyOid, szOID_CP_GOST_R3410_12_512) == 0) {
-	    return szOID_CP_GOST_R3411_12_512;
+        return szOID_CP_GOST_R3411_12_512;
     }
 
     return NULL;
@@ -186,6 +186,8 @@ static PyObject * CreateHash(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, "y#s", &message, &length, &algString))
         return NULL;
 
+    // printf("HM %s\n", message);
+
     HCRYPTPROV hProv;
     HCRYPTHASH hHash = 0;
     DWORD cbHash = 0;
@@ -217,6 +219,8 @@ static PyObject * CreateHash(PyObject *self, PyObject *args) {
         return NULL;
     }
 
+    // printf("HMC %s\n", pbData);
+
     cbHash = 64;
     BYTE rgbHash[cbHash];
 
@@ -238,6 +242,136 @@ static PyObject * CreateHash(PyObject *self, PyObject *args) {
     CryptReleaseContext(hProv, 0);
 
     return PyUnicode_FromString(hashString);
+}
+
+static PyObject * CreateSignHash(PyObject *self, PyObject *args) {
+    const char *message;
+    Py_ssize_t length;
+    const char *algString;
+    const char *thumbprint;
+    const char *storeName;
+
+    if (!PyArg_ParseTuple(args, "y#sss", &message, &length, &algString, &thumbprint, &storeName))
+        return NULL;
+
+    // printf("SM %s\n", message);
+
+    ALG_ID algId = GetAlgId(algString);
+    if (!algId) {
+        PyErr_Format(PyExc_ValueError, "Unexpected algorithm: %s", algString);
+        return NULL;
+    }
+
+    // Get algorithm
+
+    HCERTSTORE hStoreHandle;
+    PCCERT_CONTEXT pCertContext = NULL;
+    DWORD keytype = AT_KEYEXCHANGE;
+    BOOL bReleaseContext;
+    HCRYPTPROV hProv;
+    HCRYPTHASH hHash = 0;
+    DWORD cbHash = 0;
+
+    BYTE pDest[20];
+    DWORD nOutLen = 20;
+
+    if(!CryptStringToBinary(thumbprint, 40, CRYPT_STRING_HEX, pDest, &nOutLen, 0, 0)){
+        PyErr_Format(PyExc_ValueError, "CryptStringToBinary #1 failed (error 0x%x).", GetLastError());
+        return NULL;
+    }
+
+    CRYPT_HASH_BLOB para;
+    para.pbData = pDest;
+    para.cbData = nOutLen;
+
+    hStoreHandle = CertOpenSystemStore(0, storeName);
+    pCertContext = CertFindCertificateInStore(hStoreHandle, MY_ENCODING_TYPE, 0, CERT_FIND_HASH, &para, NULL);
+
+    if (!pCertContext) {
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        PyErr_SetString(CertDoesNotExist, "Could not find the desired certificate.");
+        return NULL;
+    }
+
+    // Store opened and cert found
+
+    if (!CryptAcquireCertificatePrivateKey(pCertContext, 0, NULL, &hProv, &keytype, &bReleaseContext)) {
+        CertFreeCertificateContext(pCertContext);
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        CryptReleaseContext(hProv, 0);
+        PyErr_SetString(PyExc_Exception, "CryptAcquireCertificatePrivateKey failed");
+        return NULL;
+    }
+
+    if (!CryptCreateHash(hProv, algId, 0, 0, &hHash)) {
+        CertFreeCertificateContext(pCertContext);
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        CryptReleaseContext(hProv, 0);
+        PyErr_SetString(PyExc_Exception, "CryptCreateHash failed");
+        return NULL;
+    }
+
+    BYTE *pbData = (BYTE*)message;
+
+    if (!CryptHashData(hHash, pbData, length, 0)) {
+        CertFreeCertificateContext(pCertContext);
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        CryptDestroyHash(hHash);
+        CryptReleaseContext(hProv, 0);
+        PyErr_SetString(PyExc_Exception, "CryptHashData failed");
+        return NULL;
+    }
+
+    // printf("SMC %s\n", pbData);
+
+    DWORD cbSignBlob;
+    if (!CryptSignHash(hHash, AT_KEYEXCHANGE, NULL, 0, NULL, &cbSignBlob)){
+        CertFreeCertificateContext(pCertContext);
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        CryptDestroyHash(hHash);
+        CryptReleaseContext(hProv, 0);
+        PyErr_SetString(PyExc_Exception, "CryptSignHash1 failed");
+        return NULL;
+    }
+
+    BYTE *pbSignBlob = (BYTE*) malloc(cbSignBlob);
+    if (!CryptSignHash(hHash, AT_KEYEXCHANGE, NULL, 0, pbSignBlob, &cbSignBlob)) {
+        CertFreeCertificateContext(pCertContext);
+        CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+        CryptDestroyHash(hHash);
+        CryptReleaseContext(hProv, 0);
+        PyErr_SetString(PyExc_Exception, "CryptSignHash2 failed");
+        return NULL;
+    }
+
+    CertFreeCertificateContext(pCertContext);
+    CertCloseStore(hStoreHandle, CERT_CLOSE_STORE_CHECK_FLAG);
+
+    CryptDestroyHash(hHash);
+    CryptReleaseContext(hProv, 0);
+
+    //Close contexts
+
+    // BYTE exchange = 0;
+    // for( int i=0; i < (cbSignBlob/2); i++ ) {
+    //     exchange = (pbSignBlob)[64-i-1];
+    //     (pbSignBlob)[64-i-1]=(pbSignBlob)[i];
+    //     (pbSignBlob)[i] = exchange;
+    // }
+
+    // FILE *fp = fopen("sig.sig", "wb");
+    // fwrite(pbSignBlob, 1, cbSignBlob, fp);
+    // fclose(fp);
+
+    DWORD signSize;
+    CryptBinaryToString(pbSignBlob, cbSignBlob, CRYPT_STRING_BINARY, NULL, &signSize);
+
+    // printf("%d\n", signSize);
+
+    char *signString = (char*) malloc(signSize);
+    CryptBinaryToString(pbSignBlob, cbSignBlob, CRYPT_STRING_BINARY, signString, &signSize);
+
+    return PyBytes_FromString(signString);
 }
 
 static PyObject * GetCertBySubject(PyObject *self, PyObject *args) {
@@ -656,6 +790,7 @@ static PyObject * Sign(PyObject *self, PyObject *args) {
 
 static PyMethodDef Methods[] = {
     {"create_hash", CreateHash, METH_VARARGS},
+    {"create_sign_hash", CreateSignHash, METH_VARARGS},
     {"get_cert_by_subject", GetCertBySubject, METH_VARARGS},
     {"get_cert_by_thumbprint", GetCertByThumbprint, METH_VARARGS},
     {"get_signer_cert_from_signature", GetSignerCertFromSignature, METH_VARARGS},
